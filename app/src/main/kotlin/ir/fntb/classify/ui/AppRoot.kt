@@ -87,7 +87,7 @@ fun AppRoot(vm: MainViewModel) {
     CompositionLocalProvider(LocalPhotoLoader provides vm.photoLoader) {
         when {
             s == null -> LoginScreen(vm)
-            s.role == Role.SUPER -> SuperAdminScreen(vm, s.serverUrl)
+            s.role == Role.SUPER -> SuperAdminScreen(vm)
             else -> MainContent(vm, s)
         }
     }
@@ -232,11 +232,6 @@ private fun MainContent(vm: MainViewModel, session: Session) {
                     if (session.className.isNotBlank()) {
                         Text("کلاس ${session.className}", style = MaterialTheme.typography.bodyMedium)
                     }
-                    Text(
-                        session.serverUrl,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                 }
             },
             confirmButton = { TextButton(onClick = { showSettings = false }) { Text("بستن") } },

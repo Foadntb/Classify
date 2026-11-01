@@ -124,11 +124,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- login ----------
 
-    fun loadClasses(serverUrl: String) {
+    fun loadClasses() {
         viewModelScope.launch {
             _classes.value = _classes.value.copy(busy = true, error = null)
             try {
-                val base = Api.normalize(serverUrl)
+                val base = ServerConfig.base()
                 _classes.value = ClassesState(list = Api.classes(base), loaded = true)
             } catch (e: CancellationException) {
                 throw e
@@ -167,28 +167,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _login.value = LoginState()
     }
 
-    fun loginSuper(serverUrl: String, password: String) = launchLogin(false) {
-        val base = Api.normalize(serverUrl)
+    fun loginSuper(password: String) = launchLogin(false) {
+        val base = ServerConfig.base()
         completeLogin(base, Role.SUPER, "", Api.loginSuper(base, password.trim()))
     }
 
-    fun loginManager(serverUrl: String, classId: String, password: String) = launchLogin(false) {
-        val base = Api.normalize(serverUrl)
+    fun loginManager(classId: String, password: String) = launchLogin(false) {
+        val base = ServerConfig.base()
         val r = Api.loginManager(base, classId, password.trim())
         SessionStore.rememberLogin(ctx, classId, lastValue("first"), lastValue("last"))
         completeLogin(base, Role.MANAGER, classId, r)
     }
 
-    fun loginStudent(serverUrl: String, classId: String, first: String, last: String) = launchLogin(false) {
-        val base = Api.normalize(serverUrl)
+    fun loginStudent(classId: String, first: String, last: String) = launchLogin(false) {
+        val base = ServerConfig.base()
         val r = Api.loginStudent(base, classId, first.trim(), last.trim(), SessionStore.deviceId(ctx))
         SessionStore.rememberLogin(ctx, classId, first.trim(), last.trim())
         completeLogin(base, Role.STUDENT, classId, r)
     }
 
-    fun verifyStudent(serverUrl: String, classId: String, first: String, last: String, code: String) =
+    fun verifyStudent(classId: String, first: String, last: String, code: String) =
         launchLogin(true) {
-            val base = Api.normalize(serverUrl)
+            val base = ServerConfig.base()
             val r = Api.verifyStudent(base, classId, first.trim(), last.trim(), SessionStore.deviceId(ctx), code.trim())
             SessionStore.rememberLogin(ctx, classId, first.trim(), last.trim())
             completeLogin(base, Role.STUDENT, classId, r)

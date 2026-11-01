@@ -48,14 +48,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ir.fntb.classify.R
 import ir.fntb.classify.data.MainViewModel
 import ir.fntb.classify.data.Role
+import ir.fntb.classify.data.ServerConfig
 import ir.fntb.classify.util.enDigits
 
 @Composable
 fun LoginScreen(vm: MainViewModel) {
     val state by vm.login.collectAsStateWithLifecycle()
     val classes by vm.classes.collectAsStateWithLifecycle()
-    var url by rememberSaveable { mutableStateOf(vm.lastValue("url")) }
-    var roleName by rememberSaveable { mutableStateOf(Role.STUDENT.name) }
+    // اپ دانش‌آموز فقط ورود دانش‌آموز دارد؛ اپ مدیریت فقط مدیر کلاس و مدیر کل
+    val availableRoles = if (ServerConfig.isManagerApp) listOf(Role.MANAGER, Role.SUPER) else listOf(Role.STUDENT)
+    var roleName by rememberSaveable { mutableStateOf(availableRoles.first().name) }
     var classId by rememberSaveable { mutableStateOf(vm.lastValue("classId")) }
     var first by rememberSaveable { mutableStateOf(vm.lastValue("first")) }
     var last by rememberSaveable { mutableStateOf(vm.lastValue("last")) }
@@ -64,9 +66,9 @@ fun LoginScreen(vm: MainViewModel) {
     val role = Role.valueOf(roleName)
     val selectedClass = classes.list.firstOrNull { it.id == classId }
 
-    LaunchedEffect(Unit) { if (url.isNotBlank()) vm.loadClasses(url) }
+    LaunchedEffect(Unit) { if (ServerConfig.isConfigured) vm.loadClasses() }
 
-    val canSubmit = !state.busy && url.isNotBlank() && when (role) {
+    val canSubmit = !state.busy && ServerConfig.isConfigured && when (role) {
         Role.STUDENT -> classId.isNotBlank() && first.isNotBlank() && last.isNotBlank() &&
             (!state.needsCode || code.isNotBlank())
         Role.MANAGER -> classId.isNotBlank() && secret.isNotBlank()
@@ -91,37 +93,43 @@ fun LoginScreen(vm: MainViewModel) {
                 tint = MaterialTheme.colorScheme.primary,
             )
             Spacer(Modifier.height(8.dp))
-            Text("Classify", style = MaterialTheme.typography.headlineLarge)
             Text(
-                "برنامه و تکالیف کلاس",
+                if (ServerConfig.isManagerApp) "Classify Manager" else "Classify",
+                style = MaterialTheme.typography.headlineLarge,
+            )
+            Text(
+                if (ServerConfig.isManagerApp) "مدیریت کلاس، برنامه و تکالیف" else "برنامه و تکالیف کلاس",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(24.dp))
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(Role.STUDENT, Role.MANAGER, Role.SUPER).forEach { r ->
-                    FilterChip(
-                        selected = r == role,
-                        onClick = { roleName = r.name; secret = ""; code = ""; vm.cancelCode() },
-                        label = { Text(r.label) },
+            if (availableRoles.size > 1) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    availableRoles.forEach { r ->
+                        FilterChip(
+                            selected = r == role,
+                            onClick = { roleName = r.name; secret = ""; code = ""; vm.cancelCode() },
+                            label = { Text(r.label) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+            }
+
+            if (!ServerConfig.isConfigured) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "این نسخه از اپ به سرور وصل نشده است. نسخهٔ درست را از سازندهٔ اپ بگیرید.",
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(16.dp),
                     )
                 }
             }
-            Spacer(Modifier.height(16.dp))
-
-            OutlinedTextField(
-                value = url,
-                onValueChange = { url = it },
-                label = { Text("آدرس سرور") },
-                placeholder = { Text("http://192.168.1.5:5000") },
-                singleLine = true,
-                textStyle = LocalTextStyle.current.copy(textDirection = TextDirection.Ltr),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { vm.loadClasses(url) }),
-                supportingText = { Text("آدرسی که مدیر کلاس یا مدیر کل به شما داده است") },
-                modifier = Modifier.fillMaxWidth(),
-            )
 
             if (role != Role.SUPER) {
                 Spacer(Modifier.height(8.dp))
@@ -133,8 +141,8 @@ fun LoginScreen(vm: MainViewModel) {
                 ) { classId = it.id }
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                     TextButton(
-                        enabled = url.isNotBlank() && !classes.busy,
-                        onClick = { vm.loadClasses(url) },
+                        enabled = ServerConfig.isConfigured && !classes.busy,
+                        onClick = { vm.loadClasses() },
                     ) { Text("دریافت لیست کلاس‌ها") }
                     if (classes.busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                 }
@@ -227,10 +235,10 @@ fun LoginScreen(vm: MainViewModel) {
                 onClick = {
                     when (role) {
                         Role.STUDENT ->
-                            if (state.needsCode) vm.verifyStudent(url, classId, first, last, code)
-                            else vm.loginStudent(url, classId, first, last)
-                        Role.MANAGER -> vm.loginManager(url, classId, secret)
-                        Role.SUPER -> vm.loginSuper(url, secret)
+                            if (state.needsCode) vm.verifyStudent(classId, first, last, code)
+                            else vm.loginStudent(classId, first, last)
+                        Role.MANAGER -> vm.loginManager(classId, secret)
+                        Role.SUPER -> vm.loginSuper(secret)
                     }
                 },
                 enabled = canSubmit,

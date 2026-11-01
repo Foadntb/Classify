@@ -30,7 +30,8 @@ object SessionStore {
         val token = p.getString("token", null) ?: return null
         val role = Role.entries.firstOrNull { it.name == p.getString("role", null) } ?: return null
         return Session(
-            serverUrl = url,
+            // آدرس همیشه از خود اپ می‌آید، نه از ذخیرهٔ قبلی (اگر سرور عوض شد، اپ جدید درست کار کند)
+            serverUrl = if (ServerConfig.isConfigured) ServerConfig.base() else url,
             role = role,
             token = token,
             classId = p.getString("classId", "") ?: "",
@@ -47,7 +48,6 @@ object SessionStore {
             .putString("classId", s.classId)
             .putString("className", s.className)
             .putString("displayName", s.displayName)
-            .putString("lastUrl", s.serverUrl)
             .apply()
     }
 
@@ -60,10 +60,8 @@ object SessionStore {
             .apply()
     }
 
-    fun lastUrl(ctx: Context): String = prefs(ctx).getString("lastUrl", "") ?: ""
-
     fun lastValue(ctx: Context, key: String): String =
-        if (key == "url") lastUrl(ctx) else prefs(ctx).getString("last_$key", "") ?: ""
+        prefs(ctx).getString("last_$key", "") ?: ""
 
     fun rememberLogin(ctx: Context, classId: String, first: String, last: String) {
         prefs(ctx).edit()

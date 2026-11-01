@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Classify</string>
+    <!-- app_name برای هر نسخه (دانش‌آموز / مدیر) در app/build.gradle.kts تعریف می‌شود -->
 </resources>

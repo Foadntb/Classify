@@ -27,13 +27,6 @@ data class LoginResult(val token: String, val className: String, val name: Strin
 data class AddResult(val added: Int, val duplicates: List<String>, val invalid: Int)
 
 object Api {
-    fun normalize(input: String): String {
-        var u = input.trim().trimEnd('/')
-        if (u.isEmpty()) throw ApiException(-1, "آدرس سرور را وارد کنید")
-        if (!u.startsWith("http://") && !u.startsWith("https://")) u = "http://$u"
-        return u
-    }
-
     private fun raw(
         base: String,
         path: String,

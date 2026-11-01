@@ -4,21 +4,67 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// آدرس سرور داخل اپ ساخته می‌شود (کاربر هیچ‌وقت آن را تایپ نمی‌کند).
+// در GitHub: Settings ← Secrets and variables ← Actions ← Variables ← CLASSIFY_SERVER_URL
+val serverUrl: String = (System.getenv("CLASSIFY_SERVER_URL")
+    ?: providers.gradleProperty("classifyServerUrl").orNull
+    ?: "").trim().trimEnd('/')
+
+// امضای ثابت: بدون آن، هر بیلد با کلید موقت امضا می‌شود و نسخهٔ جدید روی قبلی نصب نمی‌شود.
+val keystoreFile: String? = System.getenv("CLASSIFY_KEYSTORE_FILE")?.takeIf { it.isNotBlank() }
+
 android {
     namespace = "ir.fntb.classify"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "ir.fntb.classify"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // شمارهٔ هر بیلد GitHub به‌عنوان versionCode؛ تا نسخه‌های جدید روی قبلی نصب شوند
+        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionName = "1.1"
+
+        buildConfigField("String", "SERVER_URL", "\"$serverUrl\"")
+        // اگر آدرس https باشد، ترافیک بدون رمزنگاری کلاً ممنوع می‌شود
+        manifestPlaceholders["usesCleartext"] = if (serverUrl.startsWith("https://")) "false" else "true"
+    }
+
+    signingConfigs {
+        if (keystoreFile != null) {
+            create("classify") {
+                storeFile = file(keystoreFile)
+                storePassword = System.getenv("CLASSIFY_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("CLASSIFY_KEY_ALIAS")
+                keyPassword = System.getenv("CLASSIFY_KEY_PASSWORD")
+            }
+        }
+    }
+
+    flavorDimensions += "role"
+    productFlavors {
+        // اپ دانش‌آموز
+        create("student") {
+            dimension = "role"
+            applicationId = "ir.fntb.classify"
+            resValue("string", "app_name", "Classify")
+            buildConfigField("boolean", "MANAGER_APP", "false")
+        }
+        // اپ مدیریت (مدیر کلاس و مدیر کل)
+        create("manager") {
+            dimension = "role"
+            applicationId = "ir.fntb.classify.manager"
+            resValue("string", "app_name", "Classify Manager")
+            buildConfigField("boolean", "MANAGER_APP", "true")
+        }
     }
 
     buildTypes {
+        debug {
+            if (keystoreFile != null) signingConfig = signingConfigs.getByName("classify")
+        }
         release {
             isMinifyEnabled = false
+            if (keystoreFile != null) signingConfig = signingConfigs.getByName("classify")
         }
     }
 
@@ -33,6 +79,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     sourceSets["main"].java.srcDir("src/main/kotlin")
