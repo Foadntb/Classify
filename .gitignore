@@ -1,0 +1,10 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+# فایل‌های حساس و دادهٔ سرور — هرگز روی GitHub نروند
+server/config.json
+server/*.db
+server/__pycache__/
+__pycache__/
