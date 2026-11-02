@@ -2,11 +2,15 @@
 
 package ir.fntb.classify.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -28,6 +32,7 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.TaskAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -64,13 +69,19 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import ir.fntb.classify.data.BackupParts
+import ir.fntb.classify.data.BackupPreview
 import ir.fntb.classify.data.CLASS_REMINDER_MINUTES
 import ir.fntb.classify.data.MainViewModel
 import ir.fntb.classify.data.Role
 import ir.fntb.classify.data.Session
 import ir.fntb.classify.data.ThemeMode
+import ir.fntb.classify.util.JalaliCalendar
 import ir.fntb.classify.util.fa
 import ir.fntb.classify.util.faDigits
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 
 private data class NavItem(
     val id: String,
@@ -106,6 +117,16 @@ private fun MainContent(vm: MainViewModel, session: Session) {
     var confirmLogout by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    val backupBusy by vm.backupBusy.collectAsStateWithLifecycle()
+    val backupPreview by vm.backupPreview.collectAsStateWithLifecycle()
+    var showBackupParts by remember { mutableStateOf(false) }
+    var saveParts by remember { mutableStateOf(BackupParts()) }
+    val saveLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) vm.saveBackup(uri, saveParts)
+    }
+    val openLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.readBackup(uri)
+    }
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refresh() }
     LaunchedEffect(message) {
@@ -227,6 +248,31 @@ private fun MainContent(vm: MainViewModel, session: Session) {
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("کد تأیید برای دستگاه جدید") }
                     }
+                    if (isAdmin) {
+                        HorizontalDivider()
+                        Text("پشتیبان‌گیری", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            "درس‌ها (با عکس)، برنامهٔ هفتگی، تکالیف، اعلان‌ها و لیست دانش‌آموزان در یک فایل روی گوشی ذخیره می‌شود. اگر اطلاعات کلاس از بین رفت، با همین فایل برمی‌گردد.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(
+                            enabled = backupBusy == null,
+                            onClick = {
+                                showSettings = false
+                                showBackupParts = true
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("ذخیرهٔ پشتیبان در گوشی") }
+                        OutlinedButton(
+                            enabled = backupBusy == null,
+                            onClick = {
+                                showSettings = false
+                                openLauncher.launch(arrayOf("*/*"))
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("بازیابی از فایل پشتیبان") }
+                    }
                     HorizontalDivider()
                     Text("وارد شده‌اید به‌عنوان: ${role.label}", style = MaterialTheme.typography.bodyMedium)
                     if (session.className.isNotBlank()) {
@@ -241,6 +287,34 @@ private fun MainContent(vm: MainViewModel, session: Session) {
                 }
             },
         )
+    }
+
+    backupBusy?.let { label ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text(label) },
+            text = {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                    CircularProgressIndicator()
+                }
+            },
+            confirmButton = {},
+        )
+    }
+
+    if (showBackupParts) {
+        BackupPartsDialog(
+            onDismiss = { showBackupParts = false },
+            onContinue = { parts ->
+                saveParts = parts
+                showBackupParts = false
+                saveLauncher.launch("Classify-backup-${LocalDate.now()}.json")
+            },
+        )
+    }
+
+    backupPreview?.let { p ->
+        RestoreDialog(p, onConfirm = { parts -> vm.applyRestore(parts) }, onDismiss = { vm.cancelRestore() })
     }
 
     if (pair.busy || pair.code != null || pair.error != null) {
@@ -292,4 +366,113 @@ private fun MainContent(vm: MainViewModel, session: Session) {
             onDismiss = { confirmLogout = false },
         )
     }
+}
+
+@Composable
+private fun PartRow(
+    label: String,
+    detail: String?,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onChange: (Boolean) -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled) { onChange(!checked) },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = if (enabled) onChange else null, enabled = enabled)
+        Spacer(Modifier.width(4.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (detail != null) {
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+/** انتخاب اینکه چه چیزهایی در پشتیبان بیاید. */
+@Composable
+private fun BackupPartsDialog(onDismiss: () -> Unit, onContinue: (BackupParts) -> Unit) {
+    var parts by remember { mutableStateOf(BackupParts()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("چه چیزهایی ذخیره شود؟") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                PartRow("درس‌ها و برنامهٔ هفتگی", null, parts.schedule) { parts = parts.copy(schedule = it) }
+                PartRow("تکالیف", null, parts.homework) { parts = parts.copy(homework = it) }
+                PartRow("اعلان‌ها", null, parts.announcements) { parts = parts.copy(announcements = it) }
+                PartRow("لیست دانش‌آموزان", null, parts.students) { parts = parts.copy(students = it) }
+                PartRow("عکس درس‌ها", "حجم فایل را خیلی بیشتر می‌کند", parts.photos) { parts = parts.copy(photos = it) }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "نام درس‌ها همیشه همراه تکالیف و عکس‌ها در فایل می‌آید تا هر چیز به درس خودش وصل شود.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(enabled = parts.any, onClick = { onContinue(parts) }) { Text("ادامه") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("انصراف") } },
+    )
+}
+
+/** نمایش خلاصهٔ فایل و انتخاب اینکه چه چیزهایی بازیابی شود (فقط اجزایی که داخل فایل هست). */
+@Composable
+private fun RestoreDialog(p: BackupPreview, onConfirm: (BackupParts) -> Unit, onDismiss: () -> Unit) {
+    val has = BackupParts(
+        schedule = p.courses > 0 || p.slots > 0,
+        homework = p.homework > 0,
+        announcements = p.announcements > 0,
+        students = p.students > 0,
+        photos = p.photos > 0,
+    )
+    var parts by remember(p) { mutableStateOf(has) }
+    val date = if (p.createdAt > 0) {
+        JalaliCalendar.format(Instant.ofEpochMilli(p.createdAt).atZone(ZoneId.systemDefault()).toLocalDate())
+    } else {
+        "نامشخص"
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("بازیابی از پشتیبان") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("پشتیبان کلاس «${p.className.ifBlank { "نامشخص" }}» ، تاریخ $date")
+                if (!p.sameClass) {
+                    Text(
+                        "هشدار: این پشتیبان برای کلاس دیگری ساخته شده است.",
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Text("چه چیزهایی بازیابی شود؟", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+                PartRow("درس‌ها و برنامهٔ هفتگی", "${p.courses.fa()} درس، ${p.slots.fa()} ساعت کلاس", parts.schedule, has.schedule) {
+                    parts = parts.copy(schedule = it)
+                }
+                PartRow("تکالیف", "${p.homework.fa()} تکلیف", parts.homework, has.homework) { parts = parts.copy(homework = it) }
+                PartRow("اعلان‌ها", "${p.announcements.fa()} اعلان", parts.announcements, has.announcements) {
+                    parts = parts.copy(announcements = it)
+                }
+                PartRow("لیست دانش‌آموزان", "${p.students.fa()} نفر", parts.students, has.students) { parts = parts.copy(students = it) }
+                PartRow("عکس درس‌ها", "${p.photos.fa()} عکس", parts.photos, has.photos) { parts = parts.copy(photos = it) }
+                Text(
+                    "موارد جدید اضافه می‌شوند؛ چیزی پاک یا عوض نمی‌شود. درسی که هم‌نام یا هم‌شناسه با درس فعلی باشد دوباره اضافه نمی‌شود. " +
+                        "تکلیف و عکسِ درسی که در کلاس نیست، بدون «درس‌ها و برنامه» بازیابی نمی‌شود.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = { TextButton(enabled = parts.any, onClick = { onConfirm(parts) }) { Text("بازیابی") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("انصراف") } },
+    )
 }

@@ -16,7 +16,8 @@ object PhotoCache {
 
     private fun dir(ctx: Context) = File(ctx.filesDir, "photos").apply { mkdirs() }
 
-    suspend fun load(ctx: Context, s: Session?, courseId: String, ver: Int): ImageBitmap? =
+    /** فایل عکس را برمی‌گرداند؛ اگر روی گوشی نباشد از سرور می‌گیرد. */
+    private suspend fun ensure(ctx: Context, s: Session?, courseId: String, ver: Int): File? =
         withContext(Dispatchers.IO) {
             val f = File(dir(ctx), "${courseId}_$ver.jpg")
             if (!f.exists()) {
@@ -33,8 +34,25 @@ object PhotoCache {
                     }
                 }
             }
+            f
+        }
+
+    suspend fun load(ctx: Context, s: Session?, courseId: String, ver: Int): ImageBitmap? =
+        withContext(Dispatchers.IO) {
+            val f = ensure(ctx, s, courseId, ver) ?: return@withContext null
             try {
                 BitmapFactory.decodeFile(f.path)?.asImageBitmap()
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+    /** بایت‌های JPEG عکس (برای پشتیبان‌گیری) */
+    suspend fun bytes(ctx: Context, s: Session?, courseId: String, ver: Int): ByteArray? =
+        withContext(Dispatchers.IO) {
+            val f = ensure(ctx, s, courseId, ver) ?: return@withContext null
+            try {
+                f.readBytes()
             } catch (e: Exception) {
                 null
             }
@@ -58,6 +76,14 @@ object PendingPhotos {
 
     fun delete(ctx: Context, courseId: String) {
         File(dir(ctx), "$courseId.jpg").delete()
+    }
+
+    fun has(ctx: Context, courseId: String): Boolean = File(dir(ctx), "$courseId.jpg").exists()
+
+    fun get(ctx: Context, courseId: String): ByteArray? = try {
+        File(dir(ctx), "$courseId.jpg").takeIf { it.exists() }?.readBytes()
+    } catch (e: Exception) {
+        null
     }
 
     fun clearAll(ctx: Context) {

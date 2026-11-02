@@ -1,6 +1,7 @@
 package ir.fntb.classify.data
 
 import android.app.Application
+import android.net.Uri
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
 
 data class SyncState(val busy: Boolean = false, val error: String? = null)
@@ -38,6 +40,19 @@ data class PairState(
     val code: String? = null,
     val seconds: Int = 0,
     val error: String? = null,
+)
+
+/** خلاصهٔ فایل پشتیبانی که مدیر انتخاب کرده؛ قبل از بازیابی نشان داده می‌شود. */
+data class BackupPreview(
+    val className: String,
+    val createdAt: Long,
+    val courses: Int,
+    val slots: Int,
+    val homework: Int,
+    val announcements: Int,
+    val students: Int,
+    val photos: Int,
+    val sameClass: Boolean,
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -69,6 +84,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _themeMode = MutableStateFlow(SessionStore.themeMode(app))
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
+
+    /** متنِ در حال انجام (ساخت یا بازیابی پشتیبان)؛ null یعنی کاری در جریان نیست */
+    private val _backupBusy = MutableStateFlow<String?>(null)
+    val backupBusy: StateFlow<String?> = _backupBusy.asStateFlow()
+
+    private val _backupPreview = MutableStateFlow<BackupPreview?>(null)
+    val backupPreview: StateFlow<BackupPreview?> = _backupPreview.asStateFlow()
+    private var pendingBackup: BackupFile? = null
 
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
@@ -467,6 +490,156 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun blockStudent(id: String, minutes: Int) = studentAction(
         if (minutes > 0) "دانش‌آموز مسدود شد" else "مسدودیت برداشته شد",
     ) { Api.blockStudent(it, id, minutes) }
+
+    // ---------- backup / restore (مدیر کلاس) ----------
+
+    private fun countsText(c: Int, s: Int, h: Int, a: Int, st: Int, p: Int): String = listOfNotNull(
+        c.takeIf { it > 0 }?.let { "${it.fa()} درس" },
+        s.takeIf { it > 0 }?.let { "${it.fa()} ساعت کلاس" },
+        h.takeIf { it > 0 }?.let { "${it.fa()} تکلیف" },
+        a.takeIf { it > 0 }?.let { "${it.fa()} اعلان" },
+        st.takeIf { it > 0 }?.let { "${it.fa()} دانش‌آموز" },
+        p.takeIf { it > 0 }?.let { "${it.fa()} عکس" },
+    ).joinToString("، ")
+
+    /** همهٔ اطلاعات کلاس را در فایلی که مدیر انتخاب کرده (uri) ذخیره می‌کند. */
+    fun saveBackup(uri: Uri, parts: BackupParts) {
+        val s = _session.value ?: return
+        if (s.role != Role.MANAGER || !parts.any) return
+        viewModelScope.launch {
+            _backupBusy.value = "در حال ساخت پشتیبان…"
+            try {
+                val d = _data.value
+                val students =
+                    if (parts.students) Api.students(s).map { it.firstName to it.lastName } else emptyList()
+                val photos = mutableMapOf<String, ByteArray>()
+                if (parts.photos) {
+                    for (c in d.courses) {
+                        val bytes = PendingPhotos.get(ctx, c.id)
+                            ?: if (c.photoVer > 0) PhotoCache.bytes(ctx, s, c.id, c.photoVer) else null
+                        if (bytes != null) photos[c.id] = bytes
+                    }
+                }
+                withContext(Dispatchers.IO) {
+                    val bytes = Backup.toBytes(d, photos, students, System.currentTimeMillis(), parts)
+                    val out = ctx.contentResolver.openOutputStream(uri, "wt")
+                        ?: throw java.io.IOException("no stream")
+                    out.use { it.write(bytes) }
+                }
+                _message.value = "پشتیبان ذخیره شد: " + countsText(
+                    if (parts.schedule) d.courses.size else 0,
+                    if (parts.schedule) d.slots.size else 0,
+                    if (parts.homework) d.homework.size else 0,
+                    if (parts.announcements) d.announcements.size else 0,
+                    students.size,
+                    photos.size,
+                )
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                _message.value = when (e) {
+                    is ApiException -> handleFailure(e)
+                    is java.io.IOException -> "ذخیرهٔ فایل ممکن نشد. جای دیگری را انتخاب کنید."
+                    else -> "ساخت پشتیبان ناموفق بود."
+                }
+            } finally {
+                _backupBusy.value = null
+            }
+        }
+    }
+
+    private fun readLimited(uri: Uri): ByteArray {
+        val input = ctx.contentResolver.openInputStream(uri) ?: throw java.io.IOException("no stream")
+        input.use { ins ->
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(16 * 1024)
+            var total = 0
+            while (true) {
+                val n = ins.read(buf)
+                if (n < 0) break
+                total += n
+                if (total > Backup.MAX_FILE_BYTES) throw BackupException("این فایل خیلی بزرگ است و پشتیبان Classify نیست.")
+                out.write(buf, 0, n)
+            }
+            return out.toByteArray()
+        }
+    }
+
+    /** فایل را می‌خواند و خلاصه‌اش را برای تأیید نشان می‌دهد؛ هنوز چیزی تغییر نمی‌کند. */
+    fun readBackup(uri: Uri) {
+        if (!isAdmin) return
+        viewModelScope.launch {
+            _backupBusy.value = "در حال خواندن فایل…"
+            try {
+                val file = withContext(Dispatchers.IO) { Backup.parse(readLimited(uri)) }
+                pendingBackup = file
+                val current = _data.value.className
+                _backupPreview.value = BackupPreview(
+                    className = file.className,
+                    createdAt = file.createdAt,
+                    courses = file.data.courses.size,
+                    slots = file.data.slots.size,
+                    homework = file.data.homework.size,
+                    announcements = file.data.announcements.size,
+                    students = file.students.size,
+                    photos = file.photos.size,
+                    sameClass = file.className.isBlank() || current.isBlank() || file.className == current,
+                )
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                _message.value = when (e) {
+                    is BackupException -> e.message ?: "فایل معتبر نیست."
+                    else -> "خواندن فایل ممکن نشد."
+                }
+            } finally {
+                _backupBusy.value = null
+            }
+        }
+    }
+
+    fun cancelRestore() {
+        pendingBackup = null
+        _backupPreview.value = null
+    }
+
+    /** ادغام: موارد فایل به کلاس اضافه می‌شود؛ هیچ چیزی پاک یا عوض نمی‌شود. */
+    fun applyRestore(parts: BackupParts) {
+        val s = _session.value ?: return
+        val file = pendingBackup ?: return
+        if (!isAdmin || !parts.any) return
+        cancelRestore()
+        viewModelScope.launch {
+            _backupBusy.value = "در حال بازیابی…"
+            try {
+                val r = Backup.merge(_data.value, file.data, file.photos, parts) {
+                    it.photoVer > 0 || PendingPhotos.has(ctx, it.id)
+                }
+                withContext(Dispatchers.IO) { r.photos.forEach { (id, bytes) -> PendingPhotos.put(ctx, id, bytes) } }
+                commitEdit(r.data)
+
+                var addedStudents = 0
+                if (parts.students && file.students.isNotEmpty()) addedStudents = Api.addStudents(s, file.students).added
+
+                val added = countsText(
+                    r.addedCourses, r.addedSlots, r.addedHomework, r.addedAnnouncements, addedStudents, r.photos.size,
+                )
+                val skipped = if (r.skippedNoCourse > 0) {
+                    " ${r.skippedNoCourse.fa()} تکلیف رد شد چون درسش در کلاس نیست؛ برای آن‌ها «درس‌ها و برنامه» را هم انتخاب کنید."
+                } else ""
+                _message.value = if (added.isEmpty()) {
+                    "چیز تازه‌ای برای اضافه کردن نبود؛ همه‌چیز از قبل در کلاس بود.$skipped"
+                } else {
+                    "بازیابی انجام شد: $added اضافه شد." +
+                        (if (r.alreadyThere > 0) " (${r.alreadyThere.fa()} مورد از قبل بود)" else "") + skipped
+                }
+                loadStudents()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                _message.value = if (e is ApiException) handleFailure(e) else "بازیابی ناموفق بود."
+            } finally {
+                _backupBusy.value = null
+            }
+        }
+    }
 
     // ---------- device pairing (دانش‌آموز) ----------
 
