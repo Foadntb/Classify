@@ -127,6 +127,22 @@ object Api {
         )
     }
 
+    // ---------- app updates ----------
+
+    /** آخرین نسخهٔ منتشرشده برای این اپ (flavor = student یا manager)؛ اگر هنوز منتشر نشده null. */
+    suspend fun latestVersion(base: String, flavor: String): UpdateInfo? = withContext(Dispatchers.IO) {
+        try {
+            val o = json(base, "/api/app/$flavor/latest", "GET", null, null)
+            try {
+                UpdateInfo.fromJson(o)
+            } catch (e: Exception) {
+                throw ApiException(-2, "پاسخ سرور نامعتبر است")
+            }
+        } catch (e: ApiException) {
+            if (e.code == 404) null else throw e
+        }
+    }
+
     // ---------- class data ----------
 
     suspend fun fetch(s: Session): AppData = withContext(Dispatchers.IO) {

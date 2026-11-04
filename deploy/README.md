@@ -32,7 +32,9 @@ sudo bash Classify/deploy/setup.sh your-domain.com
 2. **Secrets (امضای ثابت):** https://github.com/Foadntb/Classify/settings/secrets/actions
    چهار secret بسازید: `KEYSTORE_BASE64` ، `KEYSTORE_PASSWORD` ، `KEY_ALIAS` ، `KEY_PASSWORD`
    (مقدارها در فایل‌های `secrets-to-add.txt` و `KEYSTORE_BASE64.txt` که همراه پروژه داده شده است.)
-3. تب Actions ← Build APKs ← Run workflow. بعد از ساخته شدن، `Classify-student` و `Classify-manager` را دانلود کنید.
+3. **Secret آپدیت داخل اپ:** یک secret دیگر به اسم `PUBLISH_TOKEN` بسازید و مقدارش را از خروجی اسکریپت نصب (خط «توکن انتشار آپدیت») بگذارید.
+   با آن، هر بیلد GitHub خودکار APKها را روی سرور منتشر می‌کند و اپ‌ها پیشنهاد آپدیت می‌دهند.
+4. تب Actions ← Build APKs ← Run workflow. بعد از ساخته شدن، `Classify-student` و `Classify-manager` را دانلود کنید.
 
 اگر روزی دامنه یا سرور عوض شد، فقط همان Variable را عوض و دوباره بیلد بگیرید. اگر دامنهٔ قبلی را به سرور جدید وصل کنید، اپ‌های نصب‌شده دست نمی‌خورند.
 
@@ -48,6 +50,8 @@ sudo bash Classify/deploy/setup.sh your-domain.com
   chown classify:classify /var/lib/classify/classify.db
   systemctl start classify
   ```
+- **توکن انتشار را گم کردید؟** `grep publish_token /var/lib/classify/config.json` (با root). برای عوض کردنش، آن خط را پاک کنید و `systemctl restart classify` بزنید؛ توکن جدید ساخته می‌شود و باید secret را هم عوض کنید.
+- **APKهای منتشرشده:** در `/var/lib/classify-apps/` (فقط آخرین نسخهٔ هر اپ). با `deploy/publish.sh` می‌توانید دستی هم منتشر کنید.
 - **فایروال (اختیاری):** `ufw allow OpenSSH && ufw allow 80 && ufw allow 443 && ufw enable`
 
 ## ۶. نکتهٔ امنیتی

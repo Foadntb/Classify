@@ -23,13 +23,14 @@ apt-get install -y python3 python3-venv python3-pip sqlite3 curl gnupg \
 
 echo "==> ساخت کاربر و پوشه‌ها"
 id classify >/dev/null 2>&1 || useradd --system --home /opt/classify --shell /usr/sbin/nologin classify
-mkdir -p /opt/classify /var/lib/classify
+mkdir -p /opt/classify /var/lib/classify /var/lib/classify-apps
 rm -rf /opt/classify/server
 cp -r "$SRC" /opt/classify/server
 rm -rf /opt/classify/server/__pycache__ /opt/classify/server/config.json /opt/classify/server/*.db
 chown -R root:root /opt/classify
-chown -R classify:classify /var/lib/classify
+chown -R classify:classify /var/lib/classify /var/lib/classify-apps
 chmod 700 /var/lib/classify
+chmod 755 /var/lib/classify-apps   # فایل‌های APK باید برای Caddy خواندنی باشد
 
 echo "==> نصب کتابخانه‌های پایتون"
 python3 -m venv /opt/classify/venv
@@ -50,6 +51,7 @@ if ! command -v caddy >/dev/null 2>&1; then
   apt-get install -y caddy
 fi
 sed "s/__DOMAIN__/$DOMAIN/" "$HERE/Caddyfile.template" > /etc/caddy/Caddyfile
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl enable caddy >/dev/null
 systemctl restart caddy
 
@@ -64,7 +66,10 @@ echo "================================================="
 echo " نصب تمام شد."
 echo " آدرس سرور:   https://$DOMAIN"
 echo " تست سلامت:   https://$DOMAIN/api/ping"
-SUPER=$(cd /opt/classify/server && sudo -u classify env CL_DB=/var/lib/classify/classify.db CL_CONFIG=/var/lib/classify/config.json /opt/classify/venv/bin/python -c "import app; print(app.CONFIG['super_password'])")
-echo " رمز مدیر کل: $SUPER"
-echo " (این رمز را جای امن بنویسید؛ بعداً در /var/lib/classify/config.json هم هست)"
+SECRETS=$(cd /opt/classify/server && sudo -u classify env CL_DB=/var/lib/classify/classify.db CL_CONFIG=/var/lib/classify/config.json /opt/classify/venv/bin/python -c "import app; print(app.CONFIG['super_password']); print(app.CONFIG['publish_token'])")
+SUPER=$(echo "$SECRETS" | sed -n 1p)
+PUBLISH=$(echo "$SECRETS" | sed -n 2p)
+echo " رمز مدیر کل:  $SUPER"
+echo " توکن انتشار آپدیت (برای GitHub Secret به اسم PUBLISH_TOKEN): $PUBLISH"
+echo " (این‌ها را جای امن بنویسید؛ بعداً در /var/lib/classify/config.json هم هست)"
 echo "================================================="

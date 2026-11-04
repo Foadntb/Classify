@@ -9,6 +9,7 @@ WorkingDirectory=/opt/classify/server
 Environment=CL_DB=/var/lib/classify/classify.db
 Environment=CL_CONFIG=/var/lib/classify/config.json
 Environment=CL_TRUST_PROXY=1
+Environment=CL_APPS_DIR=/var/lib/classify-apps
 # یک worker با چند thread: محدودیت تلاش ناموفق ورود برای همهٔ درخواست‌ها مشترک می‌ماند
 ExecStart=/opt/classify/venv/bin/gunicorn -w 1 --threads 8 -b 127.0.0.1:5000 --access-logfile - app:app
 Restart=always
@@ -17,7 +18,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/var/lib/classify
+ReadWritePaths=/var/lib/classify /var/lib/classify-apps
 
 [Install]
 WantedBy=multi-user.target

@@ -1,7 +1,32 @@
 __DOMAIN__ {
     encode gzip
-    request_body {
-        max_size 3MB
+
+    # فایل APK مستقیم از دیسک داده می‌شود (سریع و بدون اشغال کردن سرور پایتون)
+    handle /api/app/student/download {
+        rewrite * /student/classify-student.apk
+        root * /var/lib/classify-apps
+        header Cache-Control "no-store"
+        file_server
     }
-    reverse_proxy 127.0.0.1:5000
+    handle /api/app/manager/download {
+        rewrite * /manager/classify-manager.apk
+        root * /var/lib/classify-apps
+        header Cache-Control "no-store"
+        file_server
+    }
+
+    # انتشار نسخهٔ جدید (فقط با توکن) فایل بزرگ می‌پذیرد
+    handle /api/app/*/publish {
+        request_body {
+            max_size 100MB
+        }
+        reverse_proxy 127.0.0.1:5000
+    }
+
+    handle {
+        request_body {
+            max_size 3MB
+        }
+        reverse_proxy 127.0.0.1:5000
+    }
 }

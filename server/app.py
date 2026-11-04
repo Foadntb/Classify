@@ -23,13 +23,14 @@ import uuid
 from datetime import date
 from functools import wraps
 
-from flask import Flask, Response, g, jsonify, request
+from flask import Flask, Response, g, jsonify, request, send_file
 from itsdangerous import BadSignature, URLSafeSerializer
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("CL_DB", os.path.join(BASE, "classify.db"))
 CONFIG_PATH = os.environ.get("CL_CONFIG", os.path.join(BASE, "config.json"))
+APPS_DIR = os.environ.get("CL_APPS_DIR", os.path.join(BASE, "apps"))
 
 MAX_ITEMS = 1000
 MAX_STUDENTS = 400
@@ -41,6 +42,10 @@ CODE_MAX_ATTEMPTS = 5
 PRIORITIES = {"LOW", "NORMAL", "HIGH"}
 REMINDERS = {"NONE", "DAY_BEFORE", "DUE_MORNING"}
 PW_METHOD = "pbkdf2:sha256"
+APP_FLAVORS = ("student", "manager")
+MAX_APK_BYTES = 80 * 1024 * 1024
+MAX_JSON_BYTES = 2 * 1024 * 1024
+VERSION_NAME_RE = re.compile(r"\d+(\.\d+){0,3}")
 
 
 # ---------------------------------------------------------------- config
@@ -57,6 +62,9 @@ def load_config():
         alphabet = "abcdefghijkmnpqrstuvwxyz23456789"
         cfg["super_password"] = "".join(secrets.choice(alphabet) for _ in range(10))
         created = True
+    if "publish_token" not in cfg:
+        cfg["publish_token"] = secrets.token_urlsafe(32)
+        created = True
     if created:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -65,6 +73,7 @@ def load_config():
         except OSError:
             pass
     cfg["super_password"] = os.environ.get("CL_SUPER_PASSWORD", cfg["super_password"])
+    cfg["publish_token"] = os.environ.get("CL_PUBLISH_TOKEN", cfg["publish_token"])
     cfg["_created"] = created
     return cfg
 
@@ -73,11 +82,23 @@ CONFIG = load_config()
 signer = URLSafeSerializer(CONFIG["secret_key"], salt="classify-token")
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
+# بدنهٔ بزرگ فقط برای انتشار APK مجاز است؛ بقیهٔ مسیرها در before_request به ۲ مگابایت محدود می‌شوند
+app.config["MAX_CONTENT_LENGTH"] = MAX_APK_BYTES + 5 * 1024 * 1024
 app.json.ensure_ascii = False
 
 
 # ---------------------------------------------------------------- helpers
+@app.before_request
+def limit_body_size():
+    if request.method in ("POST", "PUT", "PATCH"):
+        if request.path.startswith("/api/app/") and request.path.endswith("/publish"):
+            return None
+        cl = request.content_length
+        if (cl is not None and cl > MAX_JSON_BYTES) or (cl is None and request.headers.get("Transfer-Encoding")):
+            return err("too_large", 413)
+    return None
+
+
 def now():
     return int(time.time())
 
@@ -735,6 +756,147 @@ def admin_delete(cid):
     return jsonify(ok=True)
 
 
+# ---------------------------------------------------------------- app updates
+def _flavor_dir(flavor):
+    return os.path.join(APPS_DIR, flavor)
+
+
+def _latest(flavor):
+    """اطلاعات آخرین نسخهٔ منتشرشده یا None (فایل APK باید هم‌اندازهٔ ثبت‌شده باشد)."""
+    d = _flavor_dir(flavor)
+    try:
+        with open(os.path.join(d, "latest.json"), encoding="utf-8") as f:
+            meta = json.load(f)
+        apk = os.path.join(d, f"classify-{flavor}.apk")
+        if os.path.getsize(apk) != meta["size"]:
+            return None
+        return meta
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+@app.get("/api/app/<flavor>/latest")
+def app_latest(flavor):
+    if flavor not in APP_FLAVORS:
+        return err("not_found", 404)
+    meta = _latest(flavor)
+    if meta is None:
+        return err("no_release", 404)
+    resp = jsonify(
+        versionCode=meta["versionCode"], versionName=meta["versionName"], sha256=meta["sha256"],
+        size=meta["size"], changelog=meta.get("changelog", []), publishedAt=meta.get("publishedAt", 0),
+        url=f"/api/app/{flavor}/download",
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.get("/api/app/<flavor>/download")
+def app_download(flavor):
+    if flavor not in APP_FLAVORS or _latest(flavor) is None:
+        return err("not_found", 404)
+    # در سرور واقعی Caddy همین مسیر را مستقیم از دیسک می‌دهد؛ این نسخه برای تست (Termux) است
+    return send_file(
+        os.path.join(_flavor_dir(flavor), f"classify-{flavor}.apk"),
+        mimetype="application/vnd.android.package-archive",
+        as_attachment=True, download_name=f"Classify-{flavor}.apk", conditional=True, max_age=0,
+    )
+
+
+def _clean_changelog(items):
+    if not isinstance(items, list) or len(items) > 30:
+        raise Invalid("changelog must be a list (max 30)")
+    out = []
+    for it in items:
+        if not isinstance(it, str):
+            raise Invalid("changelog items must be strings")
+        it = " ".join(it.split())
+        if it:
+            if len(it) > 300:
+                raise Invalid("changelog item too long")
+            out.append(it)
+    return out
+
+
+@app.post("/api/app/<flavor>/publish")
+def app_publish(flavor):
+    """انتشار نسخهٔ جدید (از GitHub Actions یا دستی). فیلدها: apk (فایل) و meta (JSON)."""
+    if flavor not in APP_FLAVORS:
+        return err("not_found", 404)
+    if too_many("pw"):
+        return err("too_many_attempts", 429)
+    h = request.headers.get("Authorization", "")
+    token = h[7:] if h.startswith("Bearer ") else ""
+    if not secrets.compare_digest(token.encode(), CONFIG["publish_token"].encode()):
+        record_fail("pw")
+        return err("unauthorized", 401)
+    f = request.files.get("apk")
+    if f is None:
+        return err("invalid", 400, detail="apk file missing")
+    try:
+        meta = json.loads(request.form.get("meta", ""))
+        if not isinstance(meta, dict):
+            raise ValueError
+        code = meta.get("versionCode")
+        name = meta.get("versionName")
+        if isinstance(code, bool) or not isinstance(code, int) or not (0 < code < 2_000_000_000):
+            raise Invalid("versionCode must be a positive int")
+        if not isinstance(name, str) or not VERSION_NAME_RE.fullmatch(name):
+            raise Invalid("versionName must look like 1.4 or 1.4.2")
+        changelog = _clean_changelog(meta.get("changelog", []))
+    except Invalid as e:
+        return err("invalid", 400, detail=str(e))
+    except ValueError:
+        return err("invalid", 400, detail="meta must be a JSON object")
+
+    current = _latest(flavor)
+    if current is not None and code < current["versionCode"]:
+        return err("older_version", 409, current=current["versionCode"])
+
+    d = _flavor_dir(flavor)
+    os.makedirs(d, exist_ok=True)
+    tmp_apk = os.path.join(d, f".upload-{secrets.token_hex(6)}.apk")
+    try:
+        sha, size, head = hashlib.sha256(), 0, b""
+        with open(tmp_apk, "wb") as out:
+            while True:
+                chunk = f.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                if not head:
+                    head = chunk[:4]
+                size += len(chunk)
+                if size > MAX_APK_BYTES:
+                    raise Invalid("apk too large")
+                sha.update(chunk)
+                out.write(chunk)
+        if head != b"PK\x03\x04":
+            raise Invalid("file is not an APK")
+        if size < 1024:
+            raise Invalid("apk too small")
+        info = {"versionCode": code, "versionName": name, "sha256": sha.hexdigest(), "size": size,
+                "changelog": changelog, "publishedAt": now()}
+        # اول APK، بعد latest.json؛ تا هیچ‌وقت JSONِ جدید به APKِ قدیمی اشاره نکند
+        os.replace(tmp_apk, os.path.join(d, f"classify-{flavor}.apk"))
+        tmp_json = os.path.join(d, f".latest-{secrets.token_hex(6)}.json")
+        with open(tmp_json, "w", encoding="utf-8") as jf:
+            json.dump(info, jf, ensure_ascii=False)
+        os.replace(tmp_json, os.path.join(d, "latest.json"))
+        for p in os.listdir(d):  # آپلودهای نیمه‌کاره
+            if p.startswith(".upload-") or p.startswith(".latest-"):
+                try:
+                    os.remove(os.path.join(d, p))
+                except OSError:
+                    pass
+    except Invalid as e:
+        try:
+            os.remove(tmp_apk)
+        except OSError:
+            pass
+        return err("invalid", 400, detail=str(e))
+    return jsonify(ok=True, versionCode=code, versionName=name, size=size, sha256=info["sha256"])
+
+
 # ---------------------------------------------------------------- errors
 @app.errorhandler(413)
 def too_large(_e):
@@ -758,6 +920,7 @@ if __name__ == "__main__":
     if CONFIG["_created"]:
         print("اولین اجرا — رمز مدیر کل در config.json ذخیره شد.")
     print("رمز مدیر کل:", CONFIG["super_password"])
+    print("توکن انتشار آپدیت (برای GitHub Secret به اسم PUBLISH_TOKEN):", CONFIG["publish_token"])
     print("با این رمز در اپ وارد شوید و کلاس‌ها و رمز مدیر هر کلاس را بسازید.")
     print("=" * 50)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

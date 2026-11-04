@@ -22,7 +22,7 @@ android {
         targetSdk = 35
         // شمارهٔ هر بیلد GitHub به‌عنوان versionCode؛ تا نسخه‌های جدید روی قبلی نصب شوند
         versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
-        versionName = "1.3"
+        versionName = "1.4"
 
         buildConfigField("String", "SERVER_URL", "\"$serverUrl\"")
         // اگر آدرس https باشد، ترافیک بدون رمزنگاری کلاً ممنوع می‌شود

@@ -5,13 +5,17 @@ import android.net.Uri
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import ir.fntb.classify.BuildConfig
 import ir.fntb.classify.notify.Reminders
 import ir.fntb.classify.util.fa
+import ir.fntb.classify.util.faDigits
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -55,6 +59,21 @@ data class BackupPreview(
     val sameClass: Boolean,
 )
 
+enum class UpdatePhase { IDLE, CHECKING, AVAILABLE, DOWNLOADING, READY, ERROR }
+
+/** وضعیت آپدیت داخل اپ */
+data class UpdateUi(
+    val phase: UpdatePhase = UpdatePhase.IDLE,
+    val info: UpdateInfo? = null,
+    val done: Long = 0,
+    val total: Long = 0,
+    val error: String? = null,
+    /** پنجرهٔ آپدیت باز باشد؟ */
+    val dialog: Boolean = false,
+    /** برای نصب باید اجازهٔ «نصب از این منبع» داده شود */
+    val needsPermission: Boolean = false,
+)
+
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val ctx: Application get() = getApplication()
 
@@ -85,6 +104,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _themeMode = MutableStateFlow(SessionStore.themeMode(app))
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
 
+    private val _update = MutableStateFlow(UpdateUi())
+    val update: StateFlow<UpdateUi> = _update.asStateFlow()
+    private var downloadJob: Job? = null
+
+    /** تازه‌های نسخه‌های جدید که بعد از آپدیت باید یک‌بار نشان داده شود */
+    private val _whatsNew = MutableStateFlow<List<ChangelogEntry>>(emptyList())
+    val whatsNew: StateFlow<List<ChangelogEntry>> = _whatsNew.asStateFlow()
+
     /** متنِ در حال انجام (ساخت یا بازیابی پشتیبان)؛ null یعنی کاری در جریان نیست */
     private val _backupBusy = MutableStateFlow<String?>(null)
     val backupBusy: StateFlow<String?> = _backupBusy.asStateFlow()
@@ -105,6 +132,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         Reminders.rescheduleAll(app, _data.value)
+        computeWhatsNew()
     }
 
     fun lastValue(key: String): String = SessionStore.lastValue(ctx, key)
@@ -639,6 +667,140 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _backupBusy.value = null
             }
         }
+    }
+
+    // ---------- app update (هر دو اپ) ----------
+
+    private val flavorName: String get() = if (ServerConfig.isManagerApp) "manager" else "student"
+
+    /** موقع برگشتن به اپ: ادامهٔ نصب بعد از دادن اجازه، و بررسی خودکار نسخهٔ جدید. */
+    fun onAppResumed() {
+        val u = _update.value
+        if (u.needsPermission && u.phase == UpdatePhase.READY && Updater.canInstall(ctx)) installUpdate()
+        checkForUpdate(manual = false)
+    }
+
+    /** manual = true: از دکمهٔ تنظیمات؛ همیشه نتیجه را می‌گوید. خودکار: حداکثر هر ۶ ساعت و بی‌صدا. */
+    fun checkForUpdate(manual: Boolean) {
+        if (!ServerConfig.isConfigured) return
+        val phase = _update.value.phase
+        if (phase == UpdatePhase.CHECKING || phase == UpdatePhase.DOWNLOADING) return
+        if (!manual && System.currentTimeMillis() - SessionStore.lastUpdateCheck(ctx) < 6 * 60 * 60 * 1000L) return
+        if (manual && (phase == UpdatePhase.AVAILABLE || phase == UpdatePhase.READY || phase == UpdatePhase.ERROR)) {
+            _update.update { it.copy(dialog = true) }
+            return
+        }
+        viewModelScope.launch {
+            _update.value = UpdateUi(phase = UpdatePhase.CHECKING)
+            try {
+                val info = Api.latestVersion(ServerConfig.base(), flavorName)
+                SessionStore.setLastUpdateCheck(ctx, System.currentTimeMillis())
+                if (info != null && info.versionCode > BuildConfig.VERSION_CODE) {
+                    _update.value = UpdateUi(phase = UpdatePhase.AVAILABLE, info = info, dialog = true)
+                } else {
+                    _update.value = UpdateUi()
+                    if (manual) _message.value = "شما آخرین نسخه را دارید (${BuildConfig.VERSION_NAME.faDigits()})."
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                _update.value = UpdateUi()
+                if (manual) _message.value = if (e is ApiException) Api.message(e) else "بررسی نسخهٔ جدید ممکن نشد."
+            }
+        }
+    }
+
+    fun startUpdateDownload() {
+        val info = _update.value.info ?: return
+        if (_update.value.phase == UpdatePhase.DOWNLOADING) return
+        downloadJob = viewModelScope.launch {
+            _update.update {
+                it.copy(phase = UpdatePhase.DOWNLOADING, done = 0, total = info.size, error = null, dialog = true)
+            }
+            try {
+                Updater.download(ctx, ServerConfig.base(), flavorName, info) { d, t ->
+                    _update.update { it.copy(done = d, total = t) }
+                }
+                _update.update { it.copy(phase = UpdatePhase.READY) }
+                installUpdate()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                _update.update {
+                    it.copy(
+                        phase = UpdatePhase.ERROR,
+                        error = if (e is ApiException) Api.message(e) else "دانلود ناموفق بود.",
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelUpdateDownload() {
+        downloadJob?.cancel()
+        downloadJob = null
+        _update.update { it.copy(phase = UpdatePhase.AVAILABLE, done = 0, error = null) }
+    }
+
+    /** پنجرهٔ نصب اندروید را باز می‌کند؛ اگر اجازهٔ نصب از این منبع نیست، اول صفحهٔ آن را باز می‌کند. */
+    fun installUpdate() {
+        val info = _update.value.info ?: return
+        val file = Updater.apkFile(ctx, flavorName, info.versionCode)
+        if (!file.exists()) {
+            _update.update { it.copy(phase = UpdatePhase.AVAILABLE, needsPermission = false) }
+            return
+        }
+        if (!Updater.canInstall(ctx)) {
+            _update.update { it.copy(needsPermission = true, dialog = true) }
+            try {
+                Updater.openInstallPermissionSettings(ctx)
+            } catch (e: Exception) {
+                _update.update { it.copy(error = "صفحهٔ تنظیمات باز نشد؛ اجازهٔ نصب از این منبع را دستی بدهید.") }
+            }
+            return
+        }
+        _update.update { it.copy(needsPermission = false) }
+        try {
+            Updater.install(ctx, file)
+        } catch (e: Exception) {
+            _update.update { it.copy(phase = UpdatePhase.ERROR, error = "باز کردن نصب‌کننده ممکن نشد.") }
+        }
+    }
+
+    fun dismissUpdateDialog() {
+        _update.update { it.copy(dialog = false) }
+    }
+
+    fun showUpdateDialog() {
+        _update.update { it.copy(dialog = true) }
+    }
+
+    private fun wasUpdatedBefore(): Boolean = try {
+        val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+        pi.lastUpdateTime - pi.firstInstallTime > 60_000
+    } catch (e: Exception) {
+        false
+    }
+
+    /** بعد از آپدیت، تازه‌های نسخه(های) جدید را آماده می‌کند؛ نصب تازه چیزی نشان نمی‌دهد. */
+    private fun computeWhatsNew() {
+        try {
+            val current = BuildConfig.VERSION_NAME
+            val seen = SessionStore.seenVersion(ctx)
+            if (seen == null && !wasUpdatedBefore()) {
+                SessionStore.setSeenVersion(ctx, current) // نصب تازه
+                return
+            }
+            if (seen != null && Versions.compare(current, seen) <= 0) return
+            val text = ctx.assets.open("changelog.json").bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val list = Changelog.whatsNew(Changelog.parse(text, flavorName), seen, current)
+            if (list.isEmpty()) SessionStore.setSeenVersion(ctx, current) else _whatsNew.value = list
+        } catch (e: Exception) {
+            // خواندن تازه‌ها نباید جلوی کار اپ را بگیرد
+        }
+    }
+
+    fun dismissWhatsNew() {
+        SessionStore.setSeenVersion(ctx, BuildConfig.VERSION_NAME)
+        _whatsNew.value = emptyList()
     }
 
     // ---------- device pairing (دانش‌آموز) ----------

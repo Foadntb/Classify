@@ -86,6 +86,21 @@ object SessionStore {
         return id
     }
 
+    private fun app(ctx: Context) = ctx.getSharedPreferences("app", Context.MODE_PRIVATE)
+
+    /** آخرین نسخه‌ای که کاربر «تازه‌هایش» را دیده؛ null = هنوز ثبت نشده */
+    fun seenVersion(ctx: Context): String? = app(ctx).getString("seenVersion", null)
+
+    fun setSeenVersion(ctx: Context, v: String) {
+        app(ctx).edit().putString("seenVersion", v).apply()
+    }
+
+    fun lastUpdateCheck(ctx: Context): Long = app(ctx).getLong("lastUpdateCheck", 0L)
+
+    fun setLastUpdateCheck(ctx: Context, t: Long) {
+        app(ctx).edit().putLong("lastUpdateCheck", t).apply()
+    }
+
     fun themeMode(ctx: Context): ThemeMode =
         ThemeMode.entries.firstOrNull { it.name == prefs(ctx).getString("theme", null) } ?: ThemeMode.SYSTEM
 

@@ -37,6 +37,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -69,13 +70,17 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import ir.fntb.classify.BuildConfig
 import ir.fntb.classify.data.BackupParts
 import ir.fntb.classify.data.BackupPreview
 import ir.fntb.classify.data.CLASS_REMINDER_MINUTES
+import ir.fntb.classify.data.ChangelogEntry
 import ir.fntb.classify.data.MainViewModel
 import ir.fntb.classify.data.Role
 import ir.fntb.classify.data.Session
 import ir.fntb.classify.data.ThemeMode
+import ir.fntb.classify.data.UpdatePhase
+import ir.fntb.classify.data.UpdateUi
 import ir.fntb.classify.util.JalaliCalendar
 import ir.fntb.classify.util.fa
 import ir.fntb.classify.util.faDigits
@@ -94,12 +99,30 @@ private data class NavItem(
 @Composable
 fun AppRoot(vm: MainViewModel) {
     val session by vm.session.collectAsStateWithLifecycle()
+    val update by vm.update.collectAsStateWithLifecycle()
+    val whatsNew by vm.whatsNew.collectAsStateWithLifecycle()
     val s = session
+
+    // هر بار که اپ باز می‌شود: بررسی نسخهٔ جدید (حداکثر هر ۶ ساعت) و ادامهٔ نصب بعد از دادن اجازه
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.onAppResumed() }
+
     CompositionLocalProvider(LocalPhotoLoader provides vm.photoLoader) {
         when {
             s == null -> LoginScreen(vm)
             s.role == Role.SUPER -> SuperAdminScreen(vm)
             else -> MainContent(vm, s)
+        }
+        // اول تازه‌های نسخهٔ تازه‌نصب‌شده؛ آپدیت بعدی بعد از آن
+        if (whatsNew.isNotEmpty()) {
+            WhatsNewDialog(whatsNew, onDismiss = { vm.dismissWhatsNew() })
+        } else if (update.dialog && update.phase != UpdatePhase.IDLE && update.phase != UpdatePhase.CHECKING) {
+            UpdateDialog(
+                state = update,
+                onDownload = { vm.startUpdateDownload() },
+                onInstall = { vm.installUpdate() },
+                onCancel = { vm.cancelUpdateDownload() },
+                onLater = { vm.dismissUpdateDialog() },
+            )
         }
     }
 }
@@ -117,6 +140,7 @@ private fun MainContent(vm: MainViewModel, session: Session) {
     var confirmLogout by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    val update by vm.update.collectAsStateWithLifecycle()
     val backupBusy by vm.backupBusy.collectAsStateWithLifecycle()
     val backupPreview by vm.backupPreview.collectAsStateWithLifecycle()
     var showBackupParts by remember { mutableStateOf(false) }
@@ -247,6 +271,23 @@ private fun MainContent(vm: MainViewModel, session: Session) {
                             onClick = { showSettings = false; vm.requestPairCode() },
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("کد تأیید برای دستگاه جدید") }
+                    }
+                    HorizontalDivider()
+                    Text("نسخهٔ اپ: ${BuildConfig.VERSION_NAME.faDigits()}", style = MaterialTheme.typography.bodyMedium)
+                    when (update.phase) {
+                        UpdatePhase.CHECKING -> Text("در حال بررسی نسخهٔ جدید…", style = MaterialTheme.typography.bodySmall)
+                        UpdatePhase.AVAILABLE, UpdatePhase.READY, UpdatePhase.ERROR -> OutlinedButton(
+                            onClick = { showSettings = false; vm.showUpdateDialog() },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("نسخهٔ جدید ${update.info?.versionName.orEmpty().faDigits()} آماده است") }
+                        UpdatePhase.DOWNLOADING -> OutlinedButton(
+                            onClick = { showSettings = false; vm.showUpdateDialog() },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("در حال دانلود نسخهٔ جدید…") }
+                        UpdatePhase.IDLE -> OutlinedButton(
+                            onClick = { vm.checkForUpdate(manual = true) },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("بررسی نسخهٔ جدید") }
                     }
                     if (isAdmin) {
                         HorizontalDivider()
@@ -474,5 +515,113 @@ private fun RestoreDialog(p: BackupPreview, onConfirm: (BackupParts) -> Unit, on
         },
         confirmButton = { TextButton(enabled = parts.any, onClick = { onConfirm(parts) }) { Text("بازیابی") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("انصراف") } },
+    )
+}
+
+private fun megabytes(bytes: Long): String = "%.1f".format(bytes / 1_048_576.0).faDigits()
+
+/** پیشنهاد آپدیت، دانلود با نوار پیشرفت، و نصب. */
+@Composable
+private fun UpdateDialog(
+    state: UpdateUi,
+    onDownload: () -> Unit,
+    onInstall: () -> Unit,
+    onCancel: () -> Unit,
+    onLater: () -> Unit,
+) {
+    val info = state.info ?: return
+    val sameName = info.versionName == BuildConfig.VERSION_NAME
+    val versionText = info.versionName.faDigits() + if (sameName) " (ساخت ${info.versionCode.fa()})" else ""
+    when (state.phase) {
+        UpdatePhase.DOWNLOADING -> AlertDialog(
+            onDismissRequest = {},
+            title = { Text("در حال دانلود نسخهٔ $versionText") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val total = if (state.total > 0) state.total else info.size
+                    val fraction = if (total > 0) (state.done.toFloat() / total).coerceIn(0f, 1f) else 0f
+                    LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                    Text(
+                        "${megabytes(state.done)} از ${megabytes(total)} مگابایت",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = onCancel) { Text("لغو دانلود") } },
+        )
+        UpdatePhase.READY -> AlertDialog(
+            onDismissRequest = onLater,
+            title = { Text("دانلود کامل شد") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("برای نصب نسخهٔ $versionText دکمهٔ «نصب» را بزنید؛ اندروید یک بار تأیید می‌خواهد.")
+                    if (state.needsPermission) {
+                        Text(
+                            "در صفحه‌ای که باز شد، اجازهٔ «نصب برنامه‌ها از این منبع» را روشن کنید و به اپ برگردید.",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = onInstall) { Text("نصب") } },
+            dismissButton = { TextButton(onClick = onLater) { Text("بعداً") } },
+        )
+        UpdatePhase.ERROR -> AlertDialog(
+            onDismissRequest = onLater,
+            title = { Text("آپدیت انجام نشد") },
+            text = { Text(state.error ?: "خطای ناشناخته", color = MaterialTheme.colorScheme.error) },
+            confirmButton = { TextButton(onClick = onDownload) { Text("تلاش دوباره") } },
+            dismissButton = { TextButton(onClick = onLater) { Text("بستن") } },
+        )
+        else -> AlertDialog(
+            onDismissRequest = onLater,
+            title = { Text("نسخهٔ جدید آماده است") },
+            text = {
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "نسخهٔ $versionText ، حجم حدود ${megabytes(info.size)} مگابایت",
+                        fontWeight = FontWeight.Bold,
+                    )
+                    if (info.changelog.isNotEmpty()) {
+                        Text("تازه‌ها:", style = MaterialTheme.typography.labelLarge)
+                        info.changelog.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+                    }
+                    Text(
+                        "بعد از دانلود، اندروید برای نصب از شما تأیید می‌گیرد. اطلاعات شما پاک نمی‌شود.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = onDownload) { Text("دانلود و نصب") } },
+            dismissButton = { TextButton(onClick = onLater) { Text("بعداً") } },
+        )
+    }
+}
+
+/** بعد از آپدیت: تازه‌های نسخه(های) جدید. */
+@Composable
+private fun WhatsNewDialog(entries: List<ChangelogEntry>, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("تازه‌های Classify") },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                entries.forEach { e ->
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("نسخهٔ ${e.version.faDigits()}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        e.items.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("متوجه شدم") } },
     )
 }

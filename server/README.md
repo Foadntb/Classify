@@ -35,6 +35,8 @@ python app.py
 | `GET/PUT /api/class/data` | دانش‌آموز+مدیر / مدیر | درس‌ها، برنامه، تکالیف، اعلان‌ها |
 | `GET/PUT /api/class/courses/<id>/photo` | هر دو / مدیر | عکس درس (JPEG) |
 | `GET/POST /api/class/students` · `DELETE …/<id>` · `POST …/<id>/release` · `…/<id>/block` | مدیر | مدیریت دانش‌آموزان |
+| `GET /api/app/<student\|manager>/latest` · `…/download` | — | آخرین نسخهٔ اپ و دانلود APK |
+| `POST /api/app/<student\|manager>/publish` | توکن انتشار | انتشار نسخهٔ جدید (APK + meta) |
 | `GET/POST /api/admin/classes` · `PUT/DELETE …/<id>` | مدیر کل | مدیریت کلاس‌ها |
 
 «انجام شد» روی سرور ذخیره نمی‌شود و فقط روی گوشی هر دانش‌آموز می‌ماند.
